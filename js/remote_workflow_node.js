@@ -15,12 +15,12 @@ app.registerExtension({
                 let enabledNodes = {};
                 let workflowNodes = [];
                 let workflowData = null;
-                let outputTypes = {image: false, text: false, audio: false, video: false};
+                let outputTypes = {image: false, text: false, audio: false, video: false, mask: false};
                 
                 const workflowFileWidget = node.widgets?.find(w => w.name === "workflow_file");
                 const selectedNodesWidget = node.widgets?.find(w => w.name === "selected_nodes");
                 const savedStateWidget = node.widgets?.find(w => w.name === "saved_state");
-                const ipWidget = node.widgets?.find(w => w.name === "remote_ip");
+                const ipWidget = node.widgets?.find(w => w.name === "remote_host");
                 const portWidget = node.widgets?.find(w => w.name === "remote_port");
                 
                 if (!workflowFileWidget || !selectedNodesWidget || !savedStateWidget || !ipWidget || !portWidget) {
@@ -30,7 +30,7 @@ app.registerExtension({
                 if (!workflowFileWidget.value) workflowFileWidget.value = "";
                 if (!selectedNodesWidget.value) selectedNodesWidget.value = "{}";
                 if (!savedStateWidget.value) savedStateWidget.value = "{}";
-                if (!ipWidget.value) ipWidget.value = "192.168.1.100";
+                if (!ipWidget.value) ipWidget.value = "192.168.1.100";  // IP or hostname
                 if (!portWidget.value) portWidget.value = 8188;
                 
                 const saveState = () => {
@@ -72,6 +72,7 @@ app.registerExtension({
                     
                     const inputNodeTypes = {
                         "LoadImage": "image",
+                        "LoadImageMask": "mask",
                         "LoadVideo": "video",
                         "LoadAudio": "audio",
                         "CR Prompt Text": "text",
@@ -87,7 +88,7 @@ app.registerExtension({
                         "SaveAudio": "audio"
                     };
                     
-                    outputTypes = {image: false, text: false, audio: false, video: false};
+                    outputTypes = {image: false, text: false, audio: false, video: false, mask: false};
                     
                     for (const [nodeId, nodeData] of Object.entries(workflow)) {
                         if (nodeData.class_type) {
@@ -124,22 +125,24 @@ app.registerExtension({
                     
                     const sorted = enabledList.sort((a, b) => parseInt(a.id) - parseInt(b.id));
                     
-                    const inputCounts = {image: 0, text: 0, audio: 0, video: 0};
+                    const inputCounts = {image: 0, mask: 0, text: 0, audio: 0, video: 0};
                     sorted.forEach(n => {
                         inputCounts[n.category]++;
                     });
-                    
+
                     for (const [type, count] of Object.entries(inputCounts)) {
                         if (count === 0) continue;
-                        
+
                         for (let i = 1; i <= count; i++) {
                             const inputName = `${type}_${i}`;
                             let inputType;
-                            
+
                             if (type === "text") {
                                 inputType = "STRING";
                             } else if (type === "audio") {
                                 inputType = "AUDIO";
+                            } else if (type === "mask") {
+                                inputType = "MASK";
                             } else {
                                 inputType = "IMAGE";
                             }
@@ -153,7 +156,7 @@ app.registerExtension({
                                     if (currentCount === i) {
                                         const input = node.inputs[node.inputs.length - 1];
                                         if (input) {
-                                            input.label = `${inputName} → 节点${n.id}(${n.type})`;
+                                            input.label = `${inputName} → Node ${n.id} (${n.type})`;
                                         }
                                         break;
                                     }
@@ -207,7 +210,7 @@ app.registerExtension({
                     `;
                     
                     const title = document.createElement("h2");
-                    title.textContent = "⚙️ 远程服务器设置";
+                    title.textContent = "⚙️ Remote Server Settings";
                     title.style.cssText = `
                         margin: 0;
                         color: #fff;
@@ -238,7 +241,7 @@ app.registerExtension({
                     `;
                     
                     const ipLabel = document.createElement("div");
-                    ipLabel.textContent = "🌐 IP地址";
+                    ipLabel.textContent = "🌐 Host (IP or hostname)";
                     ipLabel.style.cssText = `
                         color: #aaa;
                         margin-bottom: 10px;
@@ -248,7 +251,7 @@ app.registerExtension({
                     const ipInput = document.createElement("input");
                     ipInput.type = "text";
                     ipInput.value = ipWidget.value;
-                    ipInput.placeholder = "例如: 192.168.1.100";
+                    ipInput.placeholder = "e.g. 192.168.1.100 or myserver.local";
                     ipInput.style.cssText = `
                         width: 100%;
                         padding: 12px;
@@ -262,7 +265,7 @@ app.registerExtension({
                     `;
                     
                     const portLabel = document.createElement("div");
-                    portLabel.textContent = "🔌 端口";
+                    portLabel.textContent = "🔌 Port";
                     portLabel.style.cssText = `
                         color: #aaa;
                         margin-bottom: 10px;
@@ -272,7 +275,7 @@ app.registerExtension({
                     const portInput = document.createElement("input");
                     portInput.type = "number";
                     portInput.value = portWidget.value;
-                    portInput.placeholder = "例如: 8188";
+                    portInput.placeholder = "e.g. 8188";
                     portInput.min = "1";
                     portInput.max = "65535";
                     portInput.style.cssText = `
@@ -301,7 +304,7 @@ app.registerExtension({
                     `;
                     
                     const cancelBtn = document.createElement("button");
-                    cancelBtn.textContent = "取消";
+                    cancelBtn.textContent = "Cancel";
                     cancelBtn.style.cssText = `
                         padding: 10px 20px;
                         background: #666;
@@ -312,9 +315,9 @@ app.registerExtension({
                         font-size: 14px;
                     `;
                     cancelBtn.onclick = () => document.body.removeChild(overlay);
-                    
+
                     const saveBtn = document.createElement("button");
-                    saveBtn.textContent = "💾 保存";
+                    saveBtn.textContent = "💾 Save";
                     saveBtn.style.cssText = `
                         padding: 10px 20px;
                         background: #0088ff;
@@ -328,14 +331,14 @@ app.registerExtension({
                     saveBtn.onclick = () => {
                         const newIp = ipInput.value.trim();
                         const newPort = parseInt(portInput.value);
-                        
+
                         if (!newIp) {
-                            alert("请输入IP地址！");
+                            alert("Please enter a host (IP address or hostname).");
                             return;
                         }
-                        
+
                         if (isNaN(newPort) || newPort < 1 || newPort > 65535) {
-                            alert("端口必须在1-65535之间！");
+                            alert("Port must be between 1 and 65535!");
                             return;
                         }
                         
@@ -395,7 +398,7 @@ app.registerExtension({
                     `;
                     
                     const title = document.createElement("h2");
-                    title.textContent = "🔧 工作流解析器";
+                    title.textContent = "🔧 Workflow Parser";
                     title.style.cssText = `
                         margin: 0;
                         color: #fff;
@@ -431,7 +434,7 @@ app.registerExtension({
                     uploadSection.style.cssText = `margin-bottom: 20px;`;
                     
                     const uploadLabel = document.createElement("div");
-                    uploadLabel.textContent = "📁 上传工作流文件 (API格式 JSON)";
+                    uploadLabel.textContent = "📁 Upload workflow file (API format JSON)";
                     uploadLabel.style.cssText = `
                         color: #aaa;
                         margin-bottom: 10px;
@@ -465,7 +468,7 @@ app.registerExtension({
                     `;
                     
                     const nodesTitle = document.createElement("div");
-                    nodesTitle.textContent = "📋 可用节点列表";
+                    nodesTitle.textContent = "📋 Available Input Nodes";
                     nodesTitle.style.cssText = `
                         color: #fff;
                         margin-bottom: 15px;
@@ -484,7 +487,7 @@ app.registerExtension({
                         
                         if (workflowNodes.length === 0) {
                             const emptyMsg = document.createElement("div");
-                            emptyMsg.textContent = "请先上传工作流文件...";
+                            emptyMsg.textContent = "Upload a workflow file to get started...";
                             emptyMsg.style.cssText = `
                                 color: #666;
                                 text-align: center;
@@ -497,6 +500,7 @@ app.registerExtension({
                         
                         const categoryIcons = {
                             image: "🖼️",
+                            mask: "🎭",
                             text: "📝",
                             audio: "🔊",
                             video: "🎬"
@@ -522,7 +526,7 @@ app.registerExtension({
                                 flex: 1;
                             `;
                             const icon = categoryIcons[nodeInfo.category] || "❓";
-                            nodeLabel.textContent = `${icon} 节点 ${nodeInfo.id} - ${nodeInfo.type}`;
+                            nodeLabel.textContent = `${icon} Node ${nodeInfo.id} - ${nodeInfo.type}`;
                             
                             const toggleContainer = document.createElement("div");
                             toggleContainer.style.cssText = `position: relative; width: 50px; height: 24px;`;
@@ -577,11 +581,11 @@ app.registerExtension({
                         });
                         
                         const outInfo = [];
-                        if (outputTypes.image) outInfo.push("图像");
-                        if (outputTypes.text) outInfo.push("文本");
-                        if (outputTypes.audio) outInfo.push("音频");
-                        if (outputTypes.video) outInfo.push("视频");
-                        
+                        if (outputTypes.image) outInfo.push("image");
+                        if (outputTypes.text) outInfo.push("text");
+                        if (outputTypes.audio) outInfo.push("audio");
+                        if (outputTypes.video) outInfo.push("video");
+
                         const resultMsg = document.createElement("div");
                         resultMsg.style.cssText = `
                             margin-top: 15px;
@@ -592,7 +596,7 @@ app.registerExtension({
                             font-size: 12px;
                             text-align: center;
                         `;
-                        resultMsg.textContent = `✅ 找到 ${workflowNodes.length} 个输入节点 | 检测到输出: ${outInfo.join(", ") || "无"}`;
+                        resultMsg.textContent = `✅ Found ${workflowNodes.length} input node(s) | Outputs detected: ${outInfo.join(", ") || "none"}`;
                         nodesSection.appendChild(resultMsg);
                     };
                     
@@ -618,7 +622,7 @@ app.registerExtension({
                             renderNodesList();
                             
                         } catch (err) {
-                            alert("解析失败: " + err.message);
+                            alert("Parse error: " + err.message);
                         }
                     };
                     
@@ -632,7 +636,7 @@ app.registerExtension({
                     `;
                     
                     const cancelBtn = document.createElement("button");
-                    cancelBtn.textContent = "取消";
+                    cancelBtn.textContent = "Cancel";
                     cancelBtn.style.cssText = `
                         padding: 10px 20px;
                         background: #666;
@@ -643,9 +647,9 @@ app.registerExtension({
                         font-size: 14px;
                     `;
                     cancelBtn.onclick = () => document.body.removeChild(overlay);
-                    
+
                     const saveBtn = document.createElement("button");
-                    saveBtn.textContent = "💾 保存并更新端口";
+                    saveBtn.textContent = "💾 Save & Update Ports";
                     saveBtn.style.cssText = `
                         padding: 10px 20px;
                         background: #0088ff;
@@ -659,26 +663,26 @@ app.registerExtension({
                     saveBtn.onclick = () => {
                         const enabledList = workflowNodes.filter(n => enabledNodes[n.id]);
                         if (enabledList.length === 0) {
-                            alert("请至少启用一个节点！");
+                            alert("Please enable at least one node!");
                             return;
                         }
-                        
+
                         saveState();
                         rebuildPorts();
                         app.graph.setDirtyCanvas(true, true);
-                        
+
                         document.body.removeChild(overlay);
-                        
-                        const inputCounts = {image: 0, text: 0, audio: 0, video: 0};
+
+                        const inputCounts = {image: 0, mask: 0, text: 0, audio: 0, video: 0};
                         enabledList.forEach(n => inputCounts[n.category]++);
-                        
+
                         const outInfo = [];
-                        if (outputTypes.image) outInfo.push("图像");
-                        if (outputTypes.text) outInfo.push("文本");
-                        if (outputTypes.audio) outInfo.push("音频");
-                        if (outputTypes.video) outInfo.push("视频");
-                        
-                        alert(`✅ 保存成功！\n\n输入端口: 图像×${inputCounts.image} 文本×${inputCounts.text} 音频×${inputCounts.audio} 视频×${inputCounts.video}\n输出端口: ${outInfo.join("、") || "无"}\n\n节点已更新，可以开始使用了！`);
+                        if (outputTypes.image) outInfo.push("image");
+                        if (outputTypes.text) outInfo.push("text");
+                        if (outputTypes.audio) outInfo.push("audio");
+                        if (outputTypes.video) outInfo.push("video");
+
+                        alert(`✅ Saved!\n\nInputs: image×${inputCounts.image} mask×${inputCounts.mask} text×${inputCounts.text} audio×${inputCounts.audio} video×${inputCounts.video}\nOutputs: ${outInfo.join(", ") || "none"}\n\nPorts updated. Ready to use!`);
                     };
                     
                     footer.appendChild(cancelBtn);
@@ -773,7 +777,7 @@ app.registerExtension({
                 mainContainer.appendChild(ipContainer);
                 
                 const parseBtn = document.createElement("button");
-                parseBtn.textContent = "🔧 解析工作流";
+                parseBtn.textContent = "🔧 Parse Workflow";
                 parseBtn.style.cssText = `
                     padding: 12px;
                     background: #0088ff;

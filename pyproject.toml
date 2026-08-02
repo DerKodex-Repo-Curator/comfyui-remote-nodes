@@ -1,37 +1,28 @@
 [project]
-name = "pond_nodes_v2"
-description = "Remote workflow executor node - Execute workflows on remote ComfyUI servers. Supports image/text/audio/video input and output."
+name = "comfyui-remote-nodes"
+description = "Execute workflows on remote ComfyUI servers. Supports image, text, audio, and video input/output."
 version = "1.0.0"
-license = {file = "LICENSE"} 
+license = {file = "LICENSE"}
 # classifiers = [
-#     # For OS-independent nodes (works on all operating systems)
 #     "Operating System :: OS Independent",
-#
-#     # OR for OS-specific nodes, specify the supported systems:
-#     "Operating System :: Microsoft :: Windows",  # Windows specific
-#     "Operating System :: POSIX :: Linux",  # Linux specific
-#     "Operating System :: MacOS",  # macOS specific
-#
-#     # GPU Accelerator support. Pick the ones that are supported by your extension.
-#     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
-#     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
-#     "Environment :: GPU :: Intel Arc",      # Intel Arc support
-#     "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
-#     "Environment :: GPU :: Apple Metal",    # Apple Metal support
+#     "Environment :: GPU :: NVIDIA CUDA",
+#     "Environment :: GPU :: AMD ROCm",
+#     "Environment :: GPU :: Apple Metal",
 # ]
 
 dependencies = ["requests>=2.28.0", "numpy>=1.21.0", "Pillow>=9.0.0", "torch>=1.12.0", "torchaudio>=0.12.0", "websocket-client>=1.4.0", "opencv-python>=4.6.0"]
 
 [project.urls]
-Repository = "https://github.com/Pondowner857/comfy_Pond_Nodes_V2"
-#  Used by Comfy Registry https://registry.comfy.org
-Documentation = "https://github.com/Pondowner857/comfy_Pond_Nodes_V2/wiki"
-"Bug Tracker" = "https://github.com/Pondowner857/comfy_Pond_Nodes_V2/issues"
+Repository = "https://github.com/DerKodex-Repo-Curator/comfyui-remote-nodes"
+Documentation = "https://github.com/DerKodex-Repo-Curator/comfyui-remote-nodes#readme"
+"Bug Tracker" = "https://github.com/DerKodex-Repo-Curator/comfyui-remote-nodes/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
 
 [tool.comfy]
-PublisherId = "pondowner857"
-DisplayName = "comfy_Pond_Nodes_V2"
+PublisherId = "derkodex"
+DisplayName = "comfyui-remote-nodes"
 Icon = ""
-includes = [] 
-# "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
-
+includes = []

@@ -1,53 +1,38 @@
 import requests
 import json
-import base64
+import copy
 import io
 import os
 import time
+import uuid
+import threading
 import numpy as np
 from PIL import Image
 import torch
 import folder_paths
 
-class RemoteWorkflowExecutor:
-    
-    def __init__(self):
-        self.client_id = str(time.time())
-        self.workflow_cache = {}
-        self.hide_ip = True
+_WORKFLOW_CACHE_MAX = 10
 
-    def mask_ip(self, server_address):
-        if not self.hide_ip:
-            return server_address
-        
-        if ':' in server_address:
-            ip, port = server_address.rsplit(':', 1)
-        else:
-            ip = server_address
-            port = None
-        
-        parts = ip.split('.')
-        if len(parts) == 4:
-            masked_ip = f"{parts[0]}.***.***.{parts[3]}"
-        else:
-            masked_ip = "***.***.***"
-        
-        if port:
-            return f"{masked_ip}:****"
-        return masked_ip
-        
+class RemoteWorkflowExecutor:
+
+    def __init__(self):
+        self.client_id = str(uuid.uuid4())
+        self.workflow_cache = {}   # json_str → parsed dict
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "remote_ip": ("STRING", {"default": "192.168.1.100"}),
+                "remote_host": ("STRING", {"default": "192.168.1.100"}),
                 "remote_port": ("INT", {"default": 8188, "min": 1, "max": 65535}),
+                "timeout": ("INT", {"default": 600, "min": 10, "max": 3600}),
                 "workflow_file": ("STRING", {"default": "", "multiline": True}),
                 "selected_nodes": ("STRING", {"default": "{}", "multiline": True}),
                 "saved_state": ("STRING", {"default": "{}", "multiline": True}),
             },
             "optional": {
                 "image_1": ("IMAGE",),
+                "mask_1": ("MASK",),
                 "text_1": ("STRING", {"forceInput": True}),
                 "audio_1": ("AUDIO",),
                 "video_1": ("IMAGE",),
@@ -61,17 +46,20 @@ class RemoteWorkflowExecutor:
     RETURN_TYPES = ("IMAGE", "STRING", "AUDIO", "IMAGE")
     RETURN_NAMES = ("output_image", "output_text", "output_audio", "output_video")
     FUNCTION = "execute_remote"
-    CATEGORY = "🐳Pond_Owner/IP"
+    CATEGORY = "remote_nodes"
     
     def load_workflow(self, workflow_json_str):
         if workflow_json_str in self.workflow_cache:
             return self.workflow_cache[workflow_json_str]
-        
+
         try:
             workflow = json.loads(workflow_json_str)
+            if len(self.workflow_cache) >= _WORKFLOW_CACHE_MAX:
+                oldest_key = next(iter(self.workflow_cache))
+                del self.workflow_cache[oldest_key]
             self.workflow_cache[workflow_json_str] = workflow
             return workflow
-        except Exception as e:
+        except Exception:
             return None
 
     def get_workflow_nodes(self, workflow):
@@ -188,36 +176,118 @@ class RemoteWorkflowExecutor:
                 img_array = image_tensor
             else:
                 return None
-            
+
             img_np = (img_array.cpu().numpy() * 255).astype(np.uint8)
             img_pil = Image.fromarray(img_np, mode='RGB')
-            
+
             img_buffer = io.BytesIO()
             img_pil.save(img_buffer, format='PNG')
             img_bytes = img_buffer.getvalue()
-            
-            import uuid
-            unique_filename = f"input.png"
-            
-            files = {'image': (unique_filename, img_bytes, 'image/png')}
+
+            filename = f"input_{uuid.uuid4().hex[:8]}.png"
+            files = {'image': (filename, img_bytes, 'image/png')}
             data = {'overwrite': 'true', 'type': 'input'}
-            
+
             url = f"http://{server_address}/upload/image"
             response = requests.post(url, files=files, data=data, timeout=30)
-            
+
             if response.status_code == 200:
                 result = response.json()
-                uploaded_name = result.get('name', unique_filename)
+                uploaded_name = result.get('name', filename)
                 subfolder = result.get('subfolder', '')
-                
-                if subfolder:
-                    return f"{subfolder}/{uploaded_name}"
-                else:
-                    return uploaded_name
+                return f"{subfolder}/{uploaded_name}" if subfolder else uploaded_name
             else:
+                print(f"[remote-nodes] image upload failed: HTTP {response.status_code}")
                 return None
-                
+
         except Exception as e:
+            print(f"[remote-nodes] image upload error: {e}")
+            return None
+
+    def upload_mask_to_remote(self, server_address, mask_tensor):
+        try:
+            if mask_tensor.dim() == 3:
+                mask_tensor = mask_tensor.squeeze(0)
+            if mask_tensor.dim() != 2:
+                return None
+
+            mask_np = (mask_tensor.cpu().numpy() * 255).astype(np.uint8)
+            # Save as RGB with equal channels so LoadImageMask can extract any channel.
+            mask_rgb = np.stack([mask_np, mask_np, mask_np], axis=-1)
+            img_pil = Image.fromarray(mask_rgb, mode='RGB')
+
+            img_buffer = io.BytesIO()
+            img_pil.save(img_buffer, format='PNG')
+            img_bytes = img_buffer.getvalue()
+
+            filename = f"mask_{uuid.uuid4().hex[:8]}.png"
+            files = {'image': (filename, img_bytes, 'image/png')}
+            data = {'overwrite': 'true', 'type': 'input'}
+
+            url = f"http://{server_address}/upload/image"
+            response = requests.post(url, files=files, data=data, timeout=30)
+
+            if response.status_code == 200:
+                result = response.json()
+                uploaded_name = result.get('name', filename)
+                subfolder = result.get('subfolder', '')
+                return f"{subfolder}/{uploaded_name}" if subfolder else uploaded_name
+            else:
+                print(f"[remote-nodes] mask upload failed: HTTP {response.status_code}")
+                return None
+
+        except Exception as e:
+            print(f"[remote-nodes] mask upload error: {e}")
+            return None
+
+    def upload_video_to_remote(self, server_address, video_tensor):
+        """Upload a frame-sequence tensor (N,H,W,C) as an MP4 to the remote server."""
+        try:
+            import cv2
+            import tempfile
+
+            if video_tensor.dim() == 3:
+                video_tensor = video_tensor.unsqueeze(0)
+            if video_tensor.dim() != 4:
+                return None
+
+            frames = (video_tensor.cpu().numpy() * 255).astype(np.uint8)
+            n, h, w, c = frames.shape
+
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
+                tmp_path = tmp.name
+
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(tmp_path, fourcc, 24.0, (w, h))
+            for frame in frames:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            writer.release()
+
+            filename = f"input_{uuid.uuid4().hex[:8]}.mp4"
+            with open(tmp_path, 'rb') as f:
+                files = {'image': (filename, f, 'video/mp4')}
+                data = {'overwrite': 'true', 'type': 'input'}
+                response = requests.post(
+                    f"http://{server_address}/upload/image",
+                    files=files, data=data, timeout=60
+                )
+
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+            if response.status_code == 200:
+                result = response.json()
+                uploaded_name = result.get('name', filename)
+                subfolder = result.get('subfolder', '')
+                return f"{subfolder}/{uploaded_name}" if subfolder else uploaded_name
+            else:
+                print(f"[remote-nodes] video upload failed: HTTP {response.status_code}")
+                return None
+
+        except Exception as e:
+            print(f"[remote-nodes] video upload error: {e}")
             return None
     
     def modify_workflow_input(self, workflow, node_id, input_type, input_value, server_address):
@@ -226,20 +296,28 @@ class RemoteWorkflowExecutor:
         
         node = workflow[node_id]
         
-        if input_type == "image" or input_type == "video":
+        if input_type == "image":
             if node.get("class_type") == "LoadImage":
                 uploaded_filename = self.upload_image_to_remote(server_address, input_value)
-                
                 if uploaded_filename:
-                    if "inputs" not in node:
-                        node["inputs"] = {}
-                    node["inputs"]["image"] = uploaded_filename
+                    node.setdefault("inputs", {})["image"] = uploaded_filename
+
+        elif input_type == "video":
+            if node.get("class_type") == "LoadVideo":
+                uploaded_filename = self.upload_video_to_remote(server_address, input_value)
+                if uploaded_filename:
+                    node.setdefault("inputs", {})["video"] = uploaded_filename
+            elif node.get("class_type") == "LoadImage":
+                # fallback: send first frame as image
+                uploaded_filename = self.upload_image_to_remote(server_address, input_value)
+                if uploaded_filename:
+                    node.setdefault("inputs", {})["image"] = uploaded_filename
         
         elif input_type == "text":
             if "inputs" not in node:
                 node["inputs"] = {}
             
-            text_fields = ["prompt", "text", "string", "value"]
+            text_fields = ["text", "prompt", "string", "value"]
             
             found = False
             for field in text_fields:
@@ -251,6 +329,14 @@ class RemoteWorkflowExecutor:
             if not found:
                 node["inputs"]["prompt"] = str(input_value)
         
+        elif input_type == "mask":
+            if node.get("class_type") == "LoadImageMask":
+                uploaded_filename = self.upload_mask_to_remote(server_address, input_value)
+                if uploaded_filename:
+                    node.setdefault("inputs", {})["image"] = uploaded_filename
+                    if "channel" not in node["inputs"]:
+                        node["inputs"]["channel"] = "red"
+
         elif input_type == "audio":
             if node.get("class_type") == "LoadAudio":
                 uploaded_filename = self.upload_audio_to_remote(server_address, input_value)
@@ -283,79 +369,75 @@ class RemoteWorkflowExecutor:
     
     def wait_for_completion(self, server_address, prompt_id, timeout=600):
         import websocket
-        import threading
-        
-        result_data = {"status": None, "outputs": None}
-        ws_url = f"ws://{server_address}/ws?clientId={self.client_id}"
-        
-        start_time = time.time()
-        
+
+        outputs = {}
+        done_event = threading.Event()
+        error_flag = {"value": False}
+
         def on_message(ws, message):
             try:
                 if isinstance(message, bytes):
                     return
-                
+
                 data = json.loads(message)
                 msg_type = data.get("type")
-                
-                if msg_type == "executing":
-                    node_id = data.get("data", {}).get("node")
-                    if node_id is None:
-                        result_data["status"] = {"status_str": "success"}
-                
-                elif msg_type == "executed":
-                    node_id = data.get("data", {}).get("node")
-                    output = data.get("data", {}).get("output", {})
-                    
-                    if result_data["outputs"] is None:
-                        result_data["outputs"] = {}
-                    
-                    result_data["outputs"][node_id] = output
-                
+                msg_data = data.get("data", {})
+
+                # Ignore messages from other concurrent prompts.
+                msg_prompt_id = msg_data.get("prompt_id")
+                if msg_prompt_id and msg_prompt_id != prompt_id:
+                    return
+
+                if msg_type == "executed":
+                    node_id = msg_data.get("node")
+                    output = msg_data.get("output", {})
+                    if node_id:
+                        outputs[node_id] = output
+
+                elif msg_type == "executing":
+                    # node=None signals the workflow finished.
+                    if msg_data.get("node") is None:
+                        done_event.set()
+
                 elif msg_type == "execution_error":
-                    error_data = data.get("data", {})
-                    result_data["status"] = {"status_str": "error", "error": error_data}
-                    
+                    print(f"[remote-nodes] execution error on prompt {prompt_id}: {msg_data}")
+                    error_flag["value"] = True
+                    done_event.set()
+
             except Exception as e:
-                pass
-        
+                print(f"[remote-nodes] ws message parse error: {e}")
+
         def on_error(ws, error):
-            pass
-        
-        def on_close(ws, close_status_code, close_msg):
-            pass
-        
-        def on_open(ws):
-            pass
-        
+            print(f"[remote-nodes] ws error: {error}")
+            done_event.set()
+
+        def on_close(ws, *args):
+            done_event.set()
+
+        ws_url = f"ws://{server_address}/ws?clientId={self.client_id}"
         ws = websocket.WebSocketApp(
             ws_url,
             on_message=on_message,
             on_error=on_error,
             on_close=on_close,
-            on_open=on_open
         )
-        
+
         ws_thread = threading.Thread(target=ws.run_forever)
         ws_thread.daemon = True
         ws_thread.start()
-        
-        elapsed = 0
-        while elapsed < timeout:
-            if result_data["status"] is not None:
-                break
-            time.sleep(0.5)
-            elapsed = time.time() - start_time
-        
+
+        finished = done_event.wait(timeout=timeout)
         ws.close()
-        
-        if result_data["status"] is None:
+        ws_thread.join(timeout=2.0)
+
+        if not finished:
+            print(f"[remote-nodes] timed out waiting for prompt {prompt_id}")
             return None
-        
-        if result_data["status"].get("status_str") == "error":
+
+        if error_flag["value"]:
             return None
-        
-        return result_data["outputs"]
+
+        return outputs if outputs else None
     
     def download_output_file(self, server_address, filename, subfolder="", folder_type="output"):
         try:
@@ -531,42 +613,45 @@ class RemoteWorkflowExecutor:
         except Exception as e:
             return None
     
-    def execute_remote(self, remote_ip, remote_port, workflow_file, selected_nodes, saved_state="{}", **kwargs):
-        server_address = f"{remote_ip}:{remote_port}"
+    def execute_remote(self, remote_host, remote_port, timeout, workflow_file, selected_nodes, saved_state="{}", **kwargs):
+        server_address = f"{remote_host}:{remote_port}"
         
         if not self.test_remote_connection(server_address):
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "无法连接到远程服务器", self.create_empty_audio(), error_img)
-        
+            return (error_img, "Cannot connect to remote server", self.create_empty_audio(), error_img)
+
         workflow = self.load_workflow(workflow_file)
         if workflow is None:
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "工作流加载失败", self.create_empty_audio(), error_img)
-        
+            return (error_img, "Failed to load workflow", self.create_empty_audio(), error_img)
+
+        # Deep copy so cached workflow is never mutated between runs.
+        workflow = copy.deepcopy(workflow)
+
         is_api_format = False
-        
+
         if isinstance(workflow, dict):
             first_key = next(iter(workflow.keys()), None)
             if first_key and first_key.isdigit():
                 is_api_format = True
-        
+
         if not is_api_format:
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "请使用API格式的工作流文件", self.create_empty_audio(), error_img)
-        
+            return (error_img, "Please use API format workflow JSON", self.create_empty_audio(), error_img)
+
         try:
             selected_map = json.loads(selected_nodes)
         except:
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "选中节点数据格式错误", self.create_empty_audio(), error_img)
-        
+            return (error_img, "Invalid selected nodes data", self.create_empty_audio(), error_img)
+
         if not selected_map:
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "未选中任何节点", self.create_empty_audio(), error_img)
+            return (error_img, "No nodes selected", self.create_empty_audio(), error_img)
         
         sorted_nodes = sorted(selected_map.items(), key=lambda x: int(x[0]))
         
-        type_counters = {"image": 0, "text": 0, "audio": 0, "video": 0}
+        type_counters = {"image": 0, "mask": 0, "text": 0, "audio": 0, "video": 0}
         
         for node_id, input_type in sorted_nodes:
             type_counters[input_type] += 1
@@ -584,13 +669,13 @@ class RemoteWorkflowExecutor:
         
         if prompt_id is None:
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "提交工作流失败", self.create_empty_audio(), error_img)
-        
-        all_outputs = self.wait_for_completion(server_address, prompt_id)
-        
+            return (error_img, "Failed to submit workflow", self.create_empty_audio(), error_img)
+
+        all_outputs = self.wait_for_completion(server_address, prompt_id, timeout=timeout)
+
         if all_outputs is None:
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "执行失败或超时", self.create_empty_audio(), error_img)
+            return (error_img, "Execution failed or timed out", self.create_empty_audio(), error_img)
         
         output_images = []
         output_texts = []
@@ -739,15 +824,11 @@ class RemoteWorkflowExecutor:
                                 if audio_data is not None:
                                     output_audios.append(audio_data)
         
-        final_image = output_images[-1] if output_images else torch.zeros((1, 64, 64, 3))
-        final_text = output_texts[-1] if output_texts else "执行成功"
-        
-        if output_audios:
-            final_audio = output_audios[-1]
-        else:
-            final_audio = self.create_empty_audio()
-        
-        final_video = output_videos[-1] if output_videos else torch.zeros((1, 64, 64, 3))
+        # Concatenate batch tensors so multi-image/video outputs are preserved.
+        final_image = torch.cat(output_images, dim=0) if output_images else torch.zeros((1, 64, 64, 3))
+        final_text = "\n".join(output_texts) if output_texts else "Execution successful"
+        final_audio = output_audios[-1] if output_audios else self.create_empty_audio()
+        final_video = torch.cat(output_videos, dim=0) if output_videos else torch.zeros((1, 64, 64, 3))
         
         return (final_image, final_text, final_audio, final_video)
 
@@ -757,7 +838,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RemoteWorkflowExecutor": "🐳IP Workflow"
+    "RemoteWorkflowExecutor": "Remote Workflow Executor"
 }
 
 WEB_DIRECTORY = "./js"
