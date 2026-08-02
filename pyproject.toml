@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-remote-nodes"
-description = "Execute workflows on remote ComfyUI servers. Supports image, text, audio, and video input/output."
+description = "Execute workflows on remote ComfyUI servers. Supports image, mask, text, audio, and video input/output."
 version = "1.0.0"
 license = {file = "LICENSE"}
 # classifiers = [
