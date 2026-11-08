@@ -12,6 +12,9 @@ import torch
 import folder_paths
 
 _WORKFLOW_CACHE_MAX = 10
+# Anchor wakes a sleeping project by holding the request for up to 180s. A 5s probe
+# therefore reports "cannot connect" for a project that is merely starting.
+_WAKE_BUDGET_S = 200
 
 class RemoteWorkflowExecutor:
 
@@ -31,6 +34,9 @@ class RemoteWorkflowExecutor:
                 "saved_state": ("STRING", {"default": "{}", "multiline": True}),
             },
             "optional": {
+                # Full base URL, e.g. http://anchor:4000/comfy/krea2. When set it wins
+                # over remote_host/remote_port and may carry a path prefix.
+                "remote_url": ("STRING", {"default": "", "multiline": False}),
                 "image_1": ("IMAGE",),
                 "mask_1": ("MASK",),
                 "text_1": ("STRING", {"forceInput": True}),
@@ -80,13 +86,31 @@ class RemoteWorkflowExecutor:
             "sample_rate": 44100
         }
     
-    def test_remote_connection(self, server_address):
-        try:
-            url = f"http://{server_address}/system_stats"
-            response = requests.get(url, timeout=5)
-            return response.status_code == 200
-        except:
-            return False
+    def test_remote_connection(self, server_address, deadline_s=_WAKE_BUDGET_S):
+        """Wait for the remote, do not just probe it once.
+
+        A sleeping Anchor project answers only after the proxy wakes it, and that
+        can take up to 180 seconds. Probing once with a short timeout reports a
+        project that is starting as unreachable. Returns (ok, detail) so the node
+        can say which of the two it is.
+        """
+        url = f"http://{server_address}/system_stats"
+        started = time.time()
+        delay = 2
+        detail = "no response"
+        while True:
+            remaining = deadline_s - (time.time() - started)
+            if remaining <= 0:
+                return False, "no answer within %ss (%s); the project may still be waking" % (deadline_s, detail)
+            try:
+                response = requests.get(url, timeout=max(5, min(30, remaining)))
+                if response.status_code == 200:
+                    return True, None
+                detail = "HTTP %s" % response.status_code
+            except Exception as exc:
+                detail = type(exc).__name__
+            time.sleep(min(delay, max(1, remaining)))
+            delay = min(delay * 2, 30)
     
     def upload_audio_to_remote(self, server_address, audio_data):
         try:
@@ -613,12 +637,22 @@ class RemoteWorkflowExecutor:
         except Exception as e:
             return None
     
-    def execute_remote(self, remote_host, remote_port, timeout, workflow_file, selected_nodes, saved_state="{}", **kwargs):
-        server_address = f"{remote_host}:{remote_port}"
-        
-        if not self.test_remote_connection(server_address):
+    def execute_remote(self, remote_host, remote_port, timeout, workflow_file, selected_nodes, saved_state="{}", remote_url="", **kwargs):
+        remote_url = (remote_url or "").strip()
+        if remote_url:
+            if remote_url.startswith("https://"):
+                error_img = torch.zeros((1, 64, 64, 3))
+                return (error_img, "This node speaks plain HTTP only; https is not supported", self.create_empty_audio(), error_img)
+            if remote_url.startswith("http://"):
+                remote_url = remote_url[len("http://"):]
+            server_address = remote_url.rstrip("/")
+        else:
+            server_address = f"{remote_host}:{remote_port}"
+
+        reachable, detail = self.test_remote_connection(server_address)
+        if not reachable:
             error_img = torch.zeros((1, 64, 64, 3))
-            return (error_img, "Cannot connect to remote server", self.create_empty_audio(), error_img)
+            return (error_img, "Remote unreachable: %s" % detail, self.create_empty_audio(), error_img)
 
         workflow = self.load_workflow(workflow_file)
         if workflow is None:
