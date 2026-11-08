@@ -86,6 +86,28 @@ class RemoteWorkflowExecutor:
             "sample_rate": 44100
         }
     
+    @staticmethod
+    def _split_base(server_address):
+        """Return (scheme, rest) for a base that may or may not carry one.
+
+        Callers pass either "host:port" or a full base such as
+        https://krea2.anchor.xaas.ar. Keeping the scheme here is what lets the
+        same node reach a project through Anchor's plain-HTTP proxy or through
+        its HTTPS subdomain.
+        """
+        for scheme in ("https://", "http://"):
+            if server_address.startswith(scheme):
+                return scheme[: -3], server_address[len(scheme):].rstrip("/")
+        return "http", server_address.rstrip("/")
+
+    def _url(self, server_address, path):
+        scheme, rest = self._split_base(server_address)
+        return "%s://%s/%s" % (scheme, rest, path.lstrip("/"))
+
+    def _ws_url(self, server_address, path):
+        scheme, rest = self._split_base(server_address)
+        return "%s://%s/%s" % ("wss" if scheme == "https" else "ws", rest, path.lstrip("/"))
+
     def test_remote_connection(self, server_address, deadline_s=_WAKE_BUDGET_S):
         """Wait for the remote, do not just probe it once.
 
@@ -94,7 +116,7 @@ class RemoteWorkflowExecutor:
         project that is starting as unreachable. Returns (ok, detail) so the node
         can say which of the two it is.
         """
-        url = f"http://{server_address}/system_stats"
+        url = self._url(server_address, "system_stats")
         started = time.time()
         delay = 2
         detail = "no response"
@@ -145,7 +167,7 @@ class RemoteWorkflowExecutor:
                     files = {'image': (unique_filename, f, 'audio/wav')}
                     data = {'overwrite': 'true', 'type': 'input'}
                     
-                    url = f"http://{server_address}/upload/image"
+                    url = self._url(server_address, "upload/image")
                     response = requests.post(url, files=files, data=data, timeout=30)
                 
                 if response.status_code == 200:
@@ -170,7 +192,7 @@ class RemoteWorkflowExecutor:
                     files = {'audio': (unique_filename, f, 'audio/wav')}
                     data = {'overwrite': 'true'}
                     
-                    url = f"http://{server_address}/upload/audio"
+                    url = self._url(server_address, "upload/audio")
                     response = requests.post(url, files=files, data=data, timeout=30)
                 
                 if response.status_code == 200:
@@ -212,7 +234,7 @@ class RemoteWorkflowExecutor:
             files = {'image': (filename, img_bytes, 'image/png')}
             data = {'overwrite': 'true', 'type': 'input'}
 
-            url = f"http://{server_address}/upload/image"
+            url = self._url(server_address, "upload/image")
             response = requests.post(url, files=files, data=data, timeout=30)
 
             if response.status_code == 200:
@@ -248,7 +270,7 @@ class RemoteWorkflowExecutor:
             files = {'image': (filename, img_bytes, 'image/png')}
             data = {'overwrite': 'true', 'type': 'input'}
 
-            url = f"http://{server_address}/upload/image"
+            url = self._url(server_address, "upload/image")
             response = requests.post(url, files=files, data=data, timeout=30)
 
             if response.status_code == 200:
@@ -292,7 +314,7 @@ class RemoteWorkflowExecutor:
                 files = {'image': (filename, f, 'video/mp4')}
                 data = {'overwrite': 'true', 'type': 'input'}
                 response = requests.post(
-                    f"http://{server_address}/upload/image",
+                    self._url(server_address, "upload/image"),
                     files=files, data=data, timeout=60
                 )
 
@@ -374,7 +396,7 @@ class RemoteWorkflowExecutor:
     
     def queue_prompt(self, server_address, workflow):
         try:
-            url = f"http://{server_address}/prompt"
+            url = self._url(server_address, "prompt")
             payload = {
                 "prompt": workflow,
                 "client_id": self.client_id
@@ -438,7 +460,7 @@ class RemoteWorkflowExecutor:
         def on_close(ws, *args):
             done_event.set()
 
-        ws_url = f"ws://{server_address}/ws?clientId={self.client_id}"
+        ws_url = self._ws_url(server_address, "/ws?clientId=%s" % self.client_id)
         ws = websocket.WebSocketApp(
             ws_url,
             on_message=on_message,
@@ -465,7 +487,7 @@ class RemoteWorkflowExecutor:
     
     def download_output_file(self, server_address, filename, subfolder="", folder_type="output"):
         try:
-            url = f"http://{server_address}/view"
+            url = self._url(server_address, "view")
             params = {
                 "filename": filename,
                 "subfolder": subfolder,
@@ -591,7 +613,7 @@ class RemoteWorkflowExecutor:
     
     def download_output_audio(self, server_address, filename, subfolder="", folder_type="output"):
         try:
-            url = f"http://{server_address}/view"
+            url = self._url(server_address, "view")
             params = {
                 "filename": filename,
                 "subfolder": subfolder,
@@ -640,11 +662,9 @@ class RemoteWorkflowExecutor:
     def execute_remote(self, remote_host, remote_port, timeout, workflow_file, selected_nodes, saved_state="{}", remote_url="", **kwargs):
         remote_url = (remote_url or "").strip()
         if remote_url:
-            if remote_url.startswith("https://"):
+            if not remote_url.startswith(("http://", "https://")):
                 error_img = torch.zeros((1, 64, 64, 3))
-                return (error_img, "This node speaks plain HTTP only; https is not supported", self.create_empty_audio(), error_img)
-            if remote_url.startswith("http://"):
-                remote_url = remote_url[len("http://"):]
+                return (error_img, "remote_url must start with http:// or https://", self.create_empty_audio(), error_img)
             server_address = remote_url.rstrip("/")
         else:
             server_address = f"{remote_host}:{remote_port}"
